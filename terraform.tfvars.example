@@ -1,0 +1,46 @@
+# ============================================================
+# terraform.tfvars.example
+# ============================================================
+# HOW TO USE:
+#   1. Copy this file:  cp terraform.tfvars.example terraform.tfvars
+#   2. Fill in every <placeholder> with your real values
+#   3. NEVER commit terraform.tfvars — it is listed in .gitignore
+#
+# Sensitive values (subscription_id, db_admin_username, db_admin_password)
+# should be supplied as environment variables instead of in this file:
+#
+#   export TF_VAR_subscription_id="xxxxxxxx-xxxx-xxxx-xxxx-xxxxxxxxxxxx"
+#   export TF_VAR_db_admin_username="<your-db-admin-user>"
+#   export TF_VAR_db_admin_password="<your-strong-password>"
+#
+# Then run:
+#   terraform init
+#   terraform plan
+#   terraform apply
+
+# ── Resource placement ────────────────────────────────────────
+resource_group_name = "rg-epicbook-prod"
+location            = "uksouth"          # change to your nearest Azure region
+
+# ── Tagging ───────────────────────────────────────────────────
+common_tags = {
+  project     = "epicbook"
+  environment = "prod"
+  managed_by  = "terraform"
+}
+
+# ── Networking ────────────────────────────────────────────────
+vnet_address_space  = ["10.0.0.0/16"]
+public_subnet_cidr  = "10.0.1.0/24"
+private_subnet_cidr = "10.0.2.0/24"
+
+# ── Compute ───────────────────────────────────────────────────
+vm_size             = "Standard_B2s"
+vm_count            = 2
+vm_admin_username   = "<your-vm-admin-username>"   # no default — must be set
+ssh_public_key_path = "~/.ssh/id_rsa.pub"
+
+# ── Database ──────────────────────────────────────────────────
+# Prefer env vars for these — see instructions at top of file
+db_name = "epicbook_db"
+db_sku  = "B_Standard_B1ms"

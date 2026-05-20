@@ -1,0 +1,39 @@
+# ============================================================
+# .gitignore — Files that should NEVER be committed to this repo
+# ============================================================
+
+# ── Terraform state (CRITICAL — never commit) ────────────────
+*.tfstate
+*.tfstate.*
+*.tfstate.backup
+.terraform/
+.terraform.lock.hcl
+.terraform.tfstate.lock.info
+crash.log
+crash.*.log
+
+# ── Terraform variable files (may contain real values) ───────
+terraform.tfvars
+*.auto.tfvars
+!terraform.tfvars.example
+
+# ── Secrets and credentials ──────────────────────────────────
+.env
+.env.*
+!.env.example
+*.pem
+id_rsa
+id_rsa.*
+*.key
+
+# ── AWS / cloud config ───────────────────────────────────────
+.aws/
+credentials
+
+# ── OS and IDE ───────────────────────────────────────────────
+.DS_Store
+Thumbs.db
+.idea/
+.vscode/settings.json
+*.swp
+*.swo

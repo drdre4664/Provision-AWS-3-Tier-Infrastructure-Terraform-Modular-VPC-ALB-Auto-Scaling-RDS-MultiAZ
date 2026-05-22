@@ -1,367 +1,410 @@
-# Provision AWS 3-Tier Infrastructure with Terraform (VPC, ALB, Auto Scaling, RDS)
+# Azure 3-Tier Infrastructure with Terraform (VNet, Load Balancer, VMSS, MySQL Flexible Server)
 
-> **Part 1 of 2 — Terraform Progression** · This repo demonstrates **single-cloud AWS depth** (Auto Scaling Groups, S3 remote state, SG ID-based chaining). For the multi-cloud, modular evolution of this architecture, see [Terraform-MultiCloud-IaC-Modules-AWS-Azure-3-Tier](https://github.com/drdre4664/Terraform-MultiCloud-IaC-Modules-AWS-Azure-3-Tier).
+> **Part 1 of 2 — Terraform Progression** · This repo demonstrates **single-cloud Azure depth** (VM Scale Sets, remote state in Azure Storage, NSG chaining, MySQL Flexible Server with VNet integration). For the multi-cloud, modular evolution of this architecture that runs the same design on both AWS and Azure, see [Terraform-MultiCloud-IaC-Modules-AWS-Azure-3-Tier](https://github.com/drdre4664/Terraform-MultiCloud-IaC-Modules-AWS-Azure-3-Tier).
 
 ## What This Project Does
 
-This project provisions a complete, production-grade 3-tier web application infrastructure on AWS using Terraform — entirely from code. No resources are created manually in the AWS Console. Every component — the VPC, subnets, security groups, load balancers, EC2 auto scaling groups, and a Multi-AZ RDS database — is defined as Terraform HCL code and applied in a single run.
+This project provisions a complete, production-grade 3-tier web application infrastructure on Microsoft Azure using Terraform — entirely from code. No resources are created manually in the Azure Portal. Every component — the Resource Group, Virtual Network, subnets, Network Security Groups, Load Balancer, Virtual Machine Scale Set, and the MySQL Flexible Server — is defined as Terraform HCL and applied in a single run.
 
-The architecture is split into three tiers following the principle of separation of concerns and least-privilege networking. The web tier faces the internet. The application tier is in private subnets with no public IP. The database tier is in isolated DB subnets that only the application tier can reach. This structure is the standard for any production AWS deployment.
+The architecture follows the principle of separation of concerns and least-privilege networking. The web tier sits behind a public Load Balancer. The data tier lives on a delegated private subnet that only the web tier can reach. The whole stack is grouped under one Resource Group so a single `terraform destroy` tears everything down with no orphaned resources.
 
-The Terraform code is organised into modules — separate, reusable units for network, compute, and database. This reflects how real infrastructure teams structure Terraform codebases for maintainability and reuse.
-
----
+The Terraform code is organised into three reusable modules — `network`, `compute`, and `database`. This reflects how real infrastructure teams structure Terraform codebases for maintainability and reuse.
 
 ## Architecture
 
 ```
-                            Internet
-                               │
-                               ▼
-                      [Internet Gateway]
-                               │
-                               ▼
-                       [Public ALB]                 <-- accepts traffic from anywhere on port 80
-                               │
-                               ▼
-       [Web Tier — EC2 in Public Subnets AZ-1 & AZ-2]
-       Security Group: allows port 80 FROM Public ALB only
-                               │
-                               ▼
-                      [Internal ALB]                <-- accepts traffic from Web Tier only
-                               │
-                               ▼
-       [App Tier — EC2 in Private Subnets AZ-1 & AZ-2]
-       Security Group: allows port 3000 FROM Internal ALB only
-       No public IP — only reachable via the internal load balancer
-                               │
-                               ▼
-       [RDS MySQL — DB Subnets AZ-1 & AZ-2]
-       Multi-AZ: primary in AZ-1, automatic standby in AZ-2
-       Read Replica: separate instance for read-heavy query scaling
-       Security Group: allows port 3306 FROM App Tier ONLY
+                        Internet
+                           │
+                           ▼
+                  [Public IP — Standard SKU]
+                           │
+                           ▼
+                  [Azure Load Balancer]            <-- Standard SKU, /health probe every 15s
+                           │
+                           ▼
+        [VM Scale Set — Ubuntu 22.04 LTS]
+        Public Subnet · NSG allows port 80 from Internet
+        Auto-registers into LB backend pool
+                           │
+                           ▼
+        [Azure MySQL Flexible Server 8.0]
+        Private Subnet · delegated to Microsoft.DBforMySQL/flexibleServers
+        Private DNS zone linked to VNet — no public endpoint
 ```
 
-Each security group only allows traffic from the one tier directly above it. This means a compromised web server cannot directly access the database — it can only call the internal load balancer, which can only forward to the app tier.
+| Tier      | Azure Resource                       | Subnet         |
+| --------- | ------------------------------------ | -------------- |
+| Edge      | Public IP + Standard Load Balancer   | n/a            |
+| Web       | Linux VM Scale Set (Ubuntu 22.04)    | Public subnet  |
+| Database  | MySQL Flexible Server 8.0            | Private subnet |
 
----
+The web NSG only allows HTTP from the internet. The MySQL Flexible Server has no public endpoint at all — the VM Scale Set reaches it through the VNet via a private DNS zone, so traffic never touches the public internet.
 
 ## Project Structure
 
 ```
-06-terraform-iaac/
-├── main.tf                       # Root module — assembles all sub-modules
+.
+├── main.tf                       # Root module — wires network, compute, database together
 ├── variables.tf                  # Input variables — no hardcoded values
-├── outputs.tf                    # Outputs — ALB DNS, DB endpoint etc.
+├── outputs.tf                    # Outputs — LB public IP, DB FQDN
 ├── terraform.tfvars.example      # Safe template — copy to terraform.tfvars locally
 └── modules/
-    ├── network/                  # VPC, subnets, route tables, security groups, NAT
-    ├── compute/                  # ALBs, launch templates, auto scaling groups
-    └── database/                 # RDS subnet group, primary instance, read replica
+    ├── network/                  # VNet, public/private subnets, NSGs, NAT, DNS delegation
+    ├── compute/                  # Public IP, Load Balancer, VMSS, health probe
+    └── database/                 # Private DNS zone, VNet link, MySQL Flexible Server
 ```
 
-Splitting into modules means each concern is isolated. The network module can be updated without touching the compute or database module, and each module can be reused in other projects.
-
----
+Each module owns one concern. The network module can be evolved without touching compute or database, and each module can be reused in other projects.
 
 ## Terraform Configuration
 
-### `main.tf` — Root Module
+### `main.tf` — Root module
 
-The root module is the entry point. It calls each sub-module and passes variables between them. Notice how the network module's outputs (like `vpc_id`) are passed directly into the compute and database modules — Terraform resolves these dependencies automatically.
+The root module declares the provider, the remote state backend, and a single Resource Group that contains the entire deployment. It then calls each sub-module and passes outputs between them — Terraform resolves the dependency order automatically.
 
 ```hcl
 terraform {
-  required_version = ">= 1.0"
+  required_version = ">= 1.5.0"
+
   required_providers {
-    aws = { source = "hashicorp/aws", version = "~> 5.0" }
+    azurerm = {
+      source  = "hashicorp/azurerm"
+      version = "~> 3.90"
+    }
   }
-  backend "s3" {
-    # Remote state: Terraform stores its state file in S3 instead of locally.
-    # This allows multiple team members to work on the same infrastructure
-    # without state conflicts, and prevents state loss if a laptop dies.
-    bucket = "your-terraform-state-bucket"
-    key    = "prod/3tier/terraform.tfstate"
-    region = "us-east-1"
+
+  # Remote state lives in Azure Storage so the whole team
+  # shares a single source of truth and locks the state file
+  # during apply.
+  backend "azurerm" {
+    resource_group_name  = "rg-tfstate"
+    storage_account_name = "<your-storage-account>"
+    container_name       = "tfstate"
+    key                  = "hands-on/terraform.tfstate"
   }
 }
 
-provider "aws" { region = var.aws_region }
+provider "azurerm" {
+  features {}
+  subscription_id = var.subscription_id
+}
+
+resource "azurerm_resource_group" "main" {
+  name     = var.resource_group_name
+  location = var.location
+  tags     = var.common_tags
+}
 
 module "network" {
-  source             = "./modules/network"
-  vpc_cidr           = var.vpc_cidr
-  public_subnets     = var.public_subnets
-  private_subnets    = var.private_subnets
-  db_subnets         = var.db_subnets
-  availability_zones = var.availability_zones
-  project_name       = var.project_name
+  source              = "./modules/network"
+  resource_group_name = azurerm_resource_group.main.name
+  location            = azurerm_resource_group.main.location
+  vnet_address_space  = var.vnet_address_space
+  public_subnet_cidr  = var.public_subnet_cidr
+  private_subnet_cidr = var.private_subnet_cidr
+  common_tags         = var.common_tags
 }
 
 module "compute" {
-  source             = "./modules/compute"
-  vpc_id             = module.network.vpc_id           # output from network module
-  public_subnet_ids  = module.network.public_subnet_ids
-  private_subnet_ids = module.network.private_subnet_ids
-  web_instance_type  = var.web_instance_type
-  app_instance_type  = var.app_instance_type
-  ami_id             = var.ami_id
-  key_name           = var.key_name
-  project_name       = var.project_name
-  web_min_size       = var.web_min_size
-  web_max_size       = var.web_max_size
-  app_min_size       = var.app_min_size
-  app_max_size       = var.app_max_size
+  source              = "./modules/compute"
+  resource_group_name = azurerm_resource_group.main.name
+  location            = azurerm_resource_group.main.location
+  public_subnet_id    = module.network.public_subnet_id
+  vm_size             = var.vm_size
+  vm_count            = var.vm_count
+  admin_username      = var.vm_admin_username
+  ssh_public_key_path = var.ssh_public_key_path
+  common_tags         = var.common_tags
 }
 
 module "database" {
-  source            = "./modules/database"
-  vpc_id            = module.network.vpc_id
-  db_subnet_ids     = module.network.db_subnet_ids
-  app_sg_id         = module.compute.app_sg_id          # DB only allows this SG
-  db_name           = var.db_name
-  db_username       = var.db_username
-  db_password       = var.db_password                   # sensitive variable — never logged
-  db_instance_class = var.db_instance_class
-  project_name      = var.project_name
+  source              = "./modules/database"
+  resource_group_name = azurerm_resource_group.main.name
+  location            = azurerm_resource_group.main.location
+  private_subnet_id   = module.network.private_subnet_id
+  vnet_id             = module.network.vnet_id
+  db_admin_username   = var.db_admin_username   # sensitive — from env var
+  db_admin_password   = var.db_admin_password   # sensitive — from env var
+  db_sku              = var.db_sku
+  common_tags         = var.common_tags
 }
 ```
 
-### `modules/network/main.tf` — VPC and Security Groups
+### `modules/network/main.tf` — VNet, subnets, NSGs, subnet delegation
+
+The network module is the foundation. Two subnets are carved out of one VNet. The private subnet is **delegated** to MySQL Flexible Server, which is what unlocks VNet integration.
 
 ```hcl
-# The VPC is the private network container for all our resources
-resource "aws_vpc" "main" {
-  cidr_block           = var.vpc_cidr
-  enable_dns_hostnames = true
-  enable_dns_support   = true
-  tags = { Name = "${var.project_name}-vpc" }
+resource "azurerm_virtual_network" "main" {
+  name                = "vnet-${var.resource_group_name}"
+  resource_group_name = var.resource_group_name
+  location            = var.location
+  address_space       = var.vnet_address_space
+  tags                = var.common_tags
 }
 
-# Internet Gateway: the door between our VPC and the public internet
-resource "aws_internet_gateway" "main" {
-  vpc_id = aws_vpc.main.id
-  tags   = { Name = "${var.project_name}-igw" }
+# Public subnet — hosts the Load Balancer frontend and the VMSS instances
+resource "azurerm_subnet" "public" {
+  name                 = "snet-public"
+  resource_group_name  = var.resource_group_name
+  virtual_network_name = azurerm_virtual_network.main.name
+  address_prefixes     = [var.public_subnet_cidr]
+  service_endpoints    = ["Microsoft.Storage"]
 }
 
-# Public subnets: where web tier EC2 instances live — have routes to the internet
-resource "aws_subnet" "public" {
-  count                   = length(var.public_subnets)
-  vpc_id                  = aws_vpc.main.id
-  cidr_block              = var.public_subnets[count.index]
-  availability_zone       = var.availability_zones[count.index]
-  map_public_ip_on_launch = true
-  tags = { Name = "${var.project_name}-public-${count.index + 1}" }
+# Private subnet — hosts MySQL Flexible Server.
+# Subnet delegation is REQUIRED for Flexible Server VNet integration.
+resource "azurerm_subnet" "private" {
+  name                 = "snet-private"
+  resource_group_name  = var.resource_group_name
+  virtual_network_name = azurerm_virtual_network.main.name
+  address_prefixes     = [var.private_subnet_cidr]
+  service_endpoints    = ["Microsoft.Sql"]
+
+  delegation {
+    name = "mysql-delegation"
+    service_delegation {
+      name = "Microsoft.DBforMySQL/flexibleServers"
+      actions = [
+        "Microsoft.Network/virtualNetworks/subnets/join/action",
+      ]
+    }
+  }
 }
 
-# Private subnets: where app tier EC2 instances live — no direct internet route
-resource "aws_subnet" "private" {
-  count             = length(var.private_subnets)
-  vpc_id            = aws_vpc.main.id
-  cidr_block        = var.private_subnets[count.index]
-  availability_zone = var.availability_zones[count.index]
-  tags = { Name = "${var.project_name}-private-${count.index + 1}" }
-}
+# NSG for the web tier — explicit allow-list, default deny
+resource "azurerm_network_security_group" "web" {
+  name                = "nsg-web"
+  resource_group_name = var.resource_group_name
+  location            = var.location
 
-# DB subnets: the most isolated tier — only accepts traffic on port 3306 from app SG
-resource "aws_subnet" "db" {
-  count             = length(var.db_subnets)
-  vpc_id            = aws_vpc.main.id
-  cidr_block        = var.db_subnets[count.index]
-  availability_zone = var.availability_zones[count.index]
-  tags = { Name = "${var.project_name}-db-${count.index + 1}" }
-}
-
-# NAT Gateway: lets private subnet instances (app tier) reach the internet
-# for package downloads etc., without being reachable from the internet themselves
-resource "aws_eip" "nat" { domain = "vpc" }
-
-resource "aws_nat_gateway" "main" {
-  allocation_id = aws_eip.nat.id
-  subnet_id     = aws_subnet.public[0].id
-  tags = { Name = "${var.project_name}-nat" }
-}
-
-# Security Groups: the firewall rules for each tier
-# Each tier ONLY accepts traffic from its direct upstream source
-
-resource "aws_security_group" "alb" {
-  # Public ALB: accepts HTTP from the entire internet
-  name   = "${var.project_name}-alb-sg"
-  vpc_id = aws_vpc.main.id
-  ingress { from_port = 80; to_port = 80; protocol = "tcp"; cidr_blocks = ["0.0.0.0/0"] }
-  egress  { from_port = 0;  to_port = 0;  protocol = "-1";  cidr_blocks = ["0.0.0.0/0"] }
-}
-
-resource "aws_security_group" "web" {
-  # Web Tier: ONLY accepts traffic from the public ALB security group
-  name   = "${var.project_name}-web-sg"
-  vpc_id = aws_vpc.main.id
-  ingress { from_port = 80; to_port = 80; protocol = "tcp"; security_groups = [aws_security_group.alb.id] }
-  egress  { from_port = 0;  to_port = 0;  protocol = "-1";  cidr_blocks = ["0.0.0.0/0"] }
-}
-
-resource "aws_security_group" "internal_alb" {
-  # Internal ALB: ONLY accepts traffic from the web tier
-  name   = "${var.project_name}-internal-alb-sg"
-  vpc_id = aws_vpc.main.id
-  ingress { from_port = 80; to_port = 80; protocol = "tcp"; security_groups = [aws_security_group.web.id] }
-  egress  { from_port = 0;  to_port = 0;  protocol = "-1";  cidr_blocks = ["0.0.0.0/0"] }
-}
-
-resource "aws_security_group" "app" {
-  # App Tier: ONLY accepts traffic from the internal ALB
-  name   = "${var.project_name}-app-sg"
-  vpc_id = aws_vpc.main.id
-  ingress { from_port = 3000; to_port = 3000; protocol = "tcp"; security_groups = [aws_security_group.internal_alb.id] }
-  egress  { from_port = 0;    to_port = 0;    protocol = "-1";  cidr_blocks = ["0.0.0.0/0"] }
-}
-
-resource "aws_security_group" "db" {
-  # Database Tier: ONLY accepts MySQL traffic from the app tier security group
-  name   = "${var.project_name}-db-sg"
-  vpc_id = aws_vpc.main.id
-  ingress { from_port = 3306; to_port = 3306; protocol = "tcp"; security_groups = [aws_security_group.app.id] }
-  # No egress rule needed — RDS initiates no outbound connections
+  security_rule {
+    name                       = "allow-http-in"
+    priority                   = 100
+    direction                  = "Inbound"
+    access                     = "Allow"
+    protocol                   = "Tcp"
+    source_port_range          = "*"
+    destination_port_range     = "80"
+    source_address_prefix      = "Internet"
+    destination_address_prefix = "*"
+  }
 }
 ```
 
-### `modules/database/main.tf` — RDS Multi-AZ
+### `modules/compute/main.tf` — Public Load Balancer + VM Scale Set
+
+A Standard-SKU Load Balancer fronts a Linux VM Scale Set. The LB's health probe hits `/health` on every VM every 15 seconds; two consecutive failures remove a VM from rotation.
 
 ```hcl
-resource "aws_db_subnet_group" "main" {
-  # A DB subnet group tells RDS which subnets it can place instances in.
-  # Using subnets in two AZs is required for Multi-AZ deployments.
-  name       = "${var.project_name}-db-subnet-group"
-  subnet_ids = var.db_subnet_ids
+resource "azurerm_public_ip" "lb" {
+  name                = "pip-lb"
+  resource_group_name = var.resource_group_name
+  location            = var.location
+  allocation_method   = "Static"   # IP must not change on reboot — DNS A-record stability
+  sku                 = "Standard" # Standard SKU is mandatory for zone-redundant LB
+  tags                = var.common_tags
 }
 
-resource "aws_db_instance" "primary" {
-  identifier             = "${var.project_name}-db-primary"
-  engine                 = "mysql"
-  engine_version         = "8.0"
-  instance_class         = var.db_instance_class
-  db_name                = var.db_name
-  username               = var.db_username       # from sensitive variable — never hardcoded
-  password               = var.db_password       # from sensitive variable — never logged
-  db_subnet_group_name   = aws_db_subnet_group.main.name
-  vpc_security_group_ids = [var.db_sg_id]
-  multi_az               = true                  # RDS creates a synchronous standby in the second AZ.
-                                                 # If the primary fails, AWS fails over automatically.
-  storage_type              = "gp3"
-  allocated_storage         = 20
-  skip_final_snapshot       = false              # always take a final snapshot before destroy
-  final_snapshot_identifier = "${var.project_name}-final-snapshot"
-  backup_retention_period   = 7                  # 7 days of automated backups
+resource "azurerm_lb" "main" {
+  name                = "lb-epicbook"
+  resource_group_name = var.resource_group_name
+  location            = var.location
+  sku                 = "Standard"
+
+  frontend_ip_configuration {
+    name                 = "lb-frontend"
+    public_ip_address_id = azurerm_public_ip.lb.id
+  }
 }
 
-resource "aws_db_instance" "replica" {
-  # Read replica: a separate, asynchronously replicated instance.
-  # Offload read-heavy queries here to reduce load on the primary.
-  identifier          = "${var.project_name}-db-replica"
-  replicate_source_db = aws_db_instance.primary.identifier
-  instance_class      = var.db_instance_class
-  skip_final_snapshot = true
+resource "azurerm_lb_backend_address_pool" "main" {
+  loadbalancer_id = azurerm_lb.main.id
+  name            = "lb-backend-pool"
+}
+
+resource "azurerm_lb_probe" "http" {
+  loadbalancer_id     = azurerm_lb.main.id
+  name                = "probe-http"
+  protocol            = "Http"
+  port                = 80
+  request_path        = "/health"   # the app must return 200 OK at this path
+  interval_in_seconds = 15
+  number_of_probes    = 2
+}
+
+resource "azurerm_linux_virtual_machine_scale_set" "main" {
+  name                = "vmss-web"
+  resource_group_name = var.resource_group_name
+  location            = var.location
+  sku                 = var.vm_size
+  instances           = var.vm_count
+
+  admin_username                  = var.admin_username
+  disable_password_authentication = true   # SSH keys only — no passwords on the boundary
+
+  admin_ssh_key {
+    username   = var.admin_username
+    public_key = file(var.ssh_public_key_path)
+  }
+
+  source_image_reference {
+    publisher = "Canonical"
+    offer     = "0001-com-ubuntu-server-jammy"
+    sku       = "22_04-lts-gen2"
+    version   = "latest"     # auto-pick latest patch for security fixes
+  }
+
+  os_disk {
+    caching              = "ReadWrite"
+    storage_account_type = "Premium_LRS"
+  }
+
+  network_interface {
+    name    = "nic-vmss"
+    primary = true
+
+    ip_configuration {
+      name                                   = "ipconfig"
+      primary                                = true
+      subnet_id                              = var.public_subnet_id
+      load_balancer_backend_address_pool_ids = [azurerm_lb_backend_address_pool.main.id]
+    }
+  }
 }
 ```
 
-### `variables.tf`
+### `modules/database/main.tf` — MySQL Flexible Server with VNet integration
+
+MySQL Flexible Server with VNet integration needs a **private DNS zone** linked to the VNet so VMs can resolve the server FQDN to its private IP. Without that link, the VMs cannot find the database.
 
 ```hcl
-variable "aws_region"         { default = "us-east-1" }
-variable "project_name"       { default = "3tier-ha" }
-variable "vpc_cidr"           { default = "10.0.0.0/16" }
-variable "public_subnets"     { default = ["10.0.1.0/24", "10.0.2.0/24"] }
-variable "private_subnets"    { default = ["10.0.3.0/24", "10.0.4.0/24"] }
-variable "db_subnets"         { default = ["10.0.5.0/24", "10.0.6.0/24"] }
-variable "availability_zones" { default = ["us-east-1a", "us-east-1b"] }
-variable "ami_id"             { default = "ami-0c02fb55956c7d316" }
-variable "key_name"           { description = "Name of your EC2 key pair" }
-variable "web_instance_type"  { default = "t3.micro" }
-variable "app_instance_type"  { default = "t3.micro" }
-variable "db_instance_class"  { default = "db.t3.micro" }
-variable "db_name"            { description = "Database name" }
-variable "db_username"        { description = "Database admin username" }
-variable "db_password"        { description = "Database admin password"; sensitive = true }
-variable "web_min_size"       { default = 2 }
-variable "web_max_size"       { default = 4 }
-variable "app_min_size"       { default = 2 }
-variable "app_max_size"       { default = 4 }
-```
+resource "azurerm_private_dns_zone" "mysql" {
+  name                = "epicbook.mysql.database.azure.com"
+  resource_group_name = var.resource_group_name
+}
 
----
+resource "azurerm_private_dns_zone_virtual_network_link" "mysql" {
+  name                  = "mysql-vnet-link"
+  private_dns_zone_name = azurerm_private_dns_zone.mysql.name
+  resource_group_name   = var.resource_group_name
+  virtual_network_id    = var.vnet_id
+}
+
+resource "azurerm_mysql_flexible_server" "main" {
+  name                   = "mysql-epicbook"
+  resource_group_name    = var.resource_group_name
+  location               = var.location
+  administrator_login    = var.db_admin_username   # supplied via TF_VAR_ env var
+  administrator_password = var.db_admin_password   # supplied via TF_VAR_ env var
+  sku_name               = var.db_sku
+  version                = "8.0.21"
+
+  delegated_subnet_id = var.private_subnet_id
+  private_dns_zone_id = azurerm_private_dns_zone.mysql.id
+
+  backup_retention_days        = 7
+  geo_redundant_backup_enabled = false
+
+  maintenance_window {
+    day_of_week  = 0   # Sunday
+    start_hour   = 2   # 2am
+    start_minute = 0
+  }
+
+  depends_on = [azurerm_private_dns_zone_virtual_network_link.mysql]
+}
+```
 
 ## Step-by-Step Deployment
 
-### Step 1 — Set up your variables file
+### Step 1 — Bootstrap the remote state backend
+Terraform needs a place to store its state file before it can run. Create the Resource Group, Storage Account, and Container that the `backend "azurerm"` block in `main.tf` points to. This is a one-time setup per environment.
 
-**Why:** Terraform requires values for variables that have no defaults (like `key_name`, `db_password`). The `terraform.tfvars` file is the local source for these values. It is listed in `.gitignore` and is never committed to source control.
+```bash
+az group create --name rg-tfstate --location uksouth
+az storage account create --name <your-storage-account> --resource-group rg-tfstate --sku Standard_LRS
+az storage container create --name tfstate --account-name <your-storage-account>
+```
+
+### Step 2 — Authenticate to Azure
+Terraform reads Azure credentials from the environment. The simplest path is `az login`; for CI use a Service Principal via `ARM_CLIENT_ID` / `ARM_CLIENT_SECRET` / `ARM_TENANT_ID`.
+
+```bash
+az login
+az account set --subscription "<your-subscription-id>"
+```
+
+### Step 3 — Provide sensitive variables via environment
+Secrets never go in `terraform.tfvars`. Export them as `TF_VAR_*` env vars so they live only in the shell session.
+
+```bash
+export TF_VAR_subscription_id="xxxxxxxx-xxxx-xxxx-xxxx-xxxxxxxxxxxx"
+export TF_VAR_db_admin_username="<your-db-admin-user>"
+export TF_VAR_db_admin_password="<your-strong-password>"
+```
+
+### Step 4 — Set up your tfvars file
+Copy the template and fill in the non-sensitive values (region, sizing, tags, SSH key path).
 
 ```bash
 cp terraform.tfvars.example terraform.tfvars
-# Edit terraform.tfvars with your own values
+# edit terraform.tfvars
 ```
 
-### Step 2 — Initialise Terraform
-
-**Why:** `terraform init` downloads the AWS provider plugin and configures the S3 remote backend. This must be run once before any other Terraform command.
+### Step 5 — Initialise Terraform
+`terraform init` downloads the `azurerm` provider and configures the remote state backend. Run this once before any other Terraform command.
 
 ```bash
 terraform init
 ```
 
-### Step 3 — Preview the execution plan
-
-**Why:** `terraform plan` shows exactly what Terraform will create, modify, or destroy — without actually doing anything. Always review this output before applying. It is your safety check.
+### Step 6 — Preview the execution plan
+Always read the plan before applying. It shows exactly what will be created, modified, or destroyed — no surprises.
 
 ```bash
 terraform plan
 ```
 
-### Step 4 — Apply the infrastructure
-
-**Why:** `terraform apply` executes the plan. Terraform creates all resources in the correct dependency order — it knows the VPC must exist before subnets, subnets before instances, etc.
+### Step 7 — Apply the infrastructure
+Terraform creates resources in dependency order — the VNet before the subnets, the DNS zone before MySQL, etc.
 
 ```bash
 terraform apply
 ```
 
-### Step 5 — Retrieve and verify outputs
-
-**Why:** After apply completes, you can retrieve the DNS name of the public ALB and the RDS endpoint from Terraform outputs.
+### Step 8 — Retrieve and verify outputs
 
 ```bash
-terraform output public_alb_dns
-terraform output db_endpoint
+terraform output load_balancer_public_ip
+terraform output mysql_fqdn
 
-# Verify the load balancer health checks are passing
-curl -I http://$(terraform output -raw public_alb_dns)/health
+# Confirm the LB is serving traffic
+curl -I http://$(terraform output -raw load_balancer_public_ip)/health
 # Expected: HTTP/1.1 200 OK
 ```
 
-### Step 6 — Destroy when done
+### Step 9 — Destroy when done
+Tear down everything in reverse dependency order. Always destroy after testing — VMSS, MySQL Flexible Server, and the Standard LB are the most expensive resources here.
 
 ```bash
 terraform destroy
-# Terraform tears down every resource it created, in reverse dependency order
 ```
-
----
 
 ## What I Learned
 
-**Modular Terraform is the production standard.** Each module (network, compute, database) can be developed, tested, and reused independently.
+**Modular Terraform is the production standard.** Each module (network, compute, database) can be developed, tested, and reused independently. The root `main.tf` reads like a blueprint — three module calls — and the implementation details stay inside each module.
 
-**Remote S3 state enables team collaboration.** Without it, two people running Terraform simultaneously would corrupt the state file.
+**Remote state in Azure Storage enables team collaboration and locking.** Without it, two people running Terraform at the same time would corrupt the state file. The Storage Account's blob lease provides the locking mechanism for free.
 
-**Multi-AZ RDS provides automatic failover** — if the primary database fails, AWS promotes the standby in under two minutes with no manual intervention.
+**Subnet delegation is non-obvious but mandatory.** MySQL Flexible Server with VNet integration only works if the private subnet is delegated to `Microsoft.DBforMySQL/flexibleServers`. Forgetting this turns into a confusing apply-time error.
 
-**Security Groups as sources (instead of CIDR blocks)** is the correct pattern for inter-tier rules. It is more secure and more maintainable: if an IP changes, the rule still works because it references the SG, not the IP.
+**Private DNS zone + VNet link is what makes the database reachable.** Even with VNet integration, VMs cannot resolve the MySQL FQDN without a private DNS zone linked to the VNet. The `depends_on` between the server and the link makes the ordering explicit.
 
-**`sensitive = true` on password variables** prevents Terraform from ever printing their values in plan or apply output — a critical safeguard.
+**`sensitive = true` on password variables prevents Terraform from ever printing their values** in plan or apply output. Passing them via `TF_VAR_*` env vars instead of `tfvars` keeps them out of any committed file.
 
----
+**One Resource Group for one environment makes `terraform destroy` reliable.** Every resource in this project lives under one Resource Group, so destroy never leaves orphans.
 
 ## Tools Used
 
-Terraform · AWS VPC · EC2 · Application Load Balancer · Auto Scaling · RDS MySQL · S3 · IAM
+Terraform · Azure VNet · Subnet Delegation · NSG · Public IP · Standard Load Balancer · Linux VM Scale Set · MySQL Flexible Server · Private DNS Zone · Azure Storage (remote state) · Azure CLI

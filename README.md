@@ -1,4 +1,4 @@
-# Azure 3-Tier Infrastructure with Terraform (VNet, Load Balancer, VMSS, MySQL Flexible Server)
+# Azure 3-Tier Infrastructure with Terraform (VNet, Load Balancer, VMs, MySQL Flexible Server)
 
 > **Part 1 of 2 — Terraform Progression** · This repo demonstrates **single-cloud Azure depth** (VM Scale Sets, remote state in Azure Storage, NSG chaining, MySQL Flexible Server with VNet integration). For the multi-cloud, modular evolution of this architecture that runs the same design on both AWS and Azure, see [Terraform-MultiCloud-IaC-Modules-AWS-Azure-3-Tier](https://github.com/drdre4664/Terraform-MultiCloud-IaC-Modules-AWS-Azure-3-Tier).
 

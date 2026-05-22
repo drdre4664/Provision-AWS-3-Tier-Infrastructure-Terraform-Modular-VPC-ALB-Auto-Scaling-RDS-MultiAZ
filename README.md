@@ -1,5 +1,7 @@
 # Provision AWS 3-Tier Infrastructure with Terraform (VPC, ALB, Auto Scaling, RDS)
 
+> **Part 1 of 2 — Terraform Progression** · This repo demonstrates **single-cloud AWS depth** (Auto Scaling Groups, S3 remote state, SG ID-based chaining). For the multi-cloud, modular evolution of this architecture, see [Terraform-MultiCloud-IaC-Modules-AWS-Azure-3-Tier](https://github.com/drdre4664/Terraform-MultiCloud-IaC-Modules-AWS-Azure-3-Tier).
+
 ## What This Project Does
 
 This project provisions a complete, production-grade 3-tier web application infrastructure on AWS using Terraform — entirely from code. No resources are created manually in the AWS Console. Every component — the VPC, subnets, security groups, load balancers, EC2 auto scaling groups, and a Multi-AZ RDS database — is defined as Terraform HCL code and applied in a single run.

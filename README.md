@@ -1,4 +1,4 @@
-# Project 06 — Terraform IaaC: AWS 3-Tier Architecture with High Availability
+# Provision AWS 3-Tier Infrastructure with Terraform (VPC, ALB, Auto Scaling, RDS)
 
 ## What This Project Does
 
@@ -6,30 +6,38 @@ This project provisions a complete, production-grade 3-tier web application infr
 
 The architecture is split into three tiers following the principle of separation of concerns and least-privilege networking. The web tier faces the internet. The application tier is in private subnets with no public IP. The database tier is in isolated DB subnets that only the application tier can reach. This structure is the standard for any production AWS deployment.
 
-The Terraform code is organised into **modules** — separate, reusable units for network, compute, and database. This reflects how real infrastructure teams structure Terraform codebases for maintainability and reuse.
+The Terraform code is organised into modules — separate, reusable units for network, compute, and database. This reflects how real infrastructure teams structure Terraform codebases for maintainability and reuse.
+
+---
 
 ## Architecture
 
 ```
-Internet
-    |
-[Internet Gateway]
-    |
-[Public ALB]  ← accepts traffic from anywhere on port 80
-    |
-[Web Tier — EC2 in Public Subnets AZ-1 & AZ-2]
-    Security Group: allows port 80 FROM Public ALB only
-    |
-[Internal ALB]  ← accepts traffic from Web Tier only
-    |
-[App Tier — EC2 in Private Subnets AZ-1 & AZ-2]
-    Security Group: allows port 3000 FROM Internal ALB only
-    No public IP — only reachable via the internal load balancer
-    |
-[RDS MySQL — DB Subnets AZ-1 & AZ-2]
-    Multi-AZ: primary in AZ-1, automatic standby in AZ-2
-    Read Replica: separate instance for read-heavy query scaling
-    Security Group: allows port 3306 FROM App Tier ONLY
+                            Internet
+                               │
+                               ▼
+                      [Internet Gateway]
+                               │
+                               ▼
+                       [Public ALB]                 <-- accepts traffic from anywhere on port 80
+                               │
+                               ▼
+       [Web Tier — EC2 in Public Subnets AZ-1 & AZ-2]
+       Security Group: allows port 80 FROM Public ALB only
+                               │
+                               ▼
+                      [Internal ALB]                <-- accepts traffic from Web Tier only
+                               │
+                               ▼
+       [App Tier — EC2 in Private Subnets AZ-1 & AZ-2]
+       Security Group: allows port 3000 FROM Internal ALB only
+       No public IP — only reachable via the internal load balancer
+                               │
+                               ▼
+       [RDS MySQL — DB Subnets AZ-1 & AZ-2]
+       Multi-AZ: primary in AZ-1, automatic standby in AZ-2
+       Read Replica: separate instance for read-heavy query scaling
+       Security Group: allows port 3306 FROM App Tier ONLY
 ```
 
 Each security group only allows traffic from the one tier directly above it. This means a compromised web server cannot directly access the database — it can only call the internal load balancer, which can only forward to the app tier.
@@ -40,14 +48,14 @@ Each security group only allows traffic from the one tier directly above it. Thi
 
 ```
 06-terraform-iaac/
-├── main.tf                    # Root module — assembles all sub-modules
-├── variables.tf               # Input variables — no hardcoded values
-├── outputs.tf                 # Outputs — ALB DNS, DB endpoint etc.
-├── terraform.tfvars.example   # Safe template — copy to terraform.tfvars locally
+├── main.tf                       # Root module — assembles all sub-modules
+├── variables.tf                  # Input variables — no hardcoded values
+├── outputs.tf                    # Outputs — ALB DNS, DB endpoint etc.
+├── terraform.tfvars.example      # Safe template — copy to terraform.tfvars locally
 └── modules/
-    ├── network/               # VPC, subnets, route tables, security groups, NAT
-    ├── compute/               # ALBs, launch templates, auto scaling groups
-    └── database/              # RDS subnet group, primary instance, read replica
+    ├── network/                  # VPC, subnets, route tables, security groups, NAT
+    ├── compute/                  # ALBs, launch templates, auto scaling groups
+    └── database/                 # RDS subnet group, primary instance, read replica
 ```
 
 Splitting into modules means each concern is isolated. The network module can be updated without touching the compute or database module, and each module can be reused in other projects.
@@ -56,7 +64,7 @@ Splitting into modules means each concern is isolated. The network module can be
 
 ## Terraform Configuration
 
-### main.tf — Root Module
+### `main.tf` — Root Module
 
 The root module is the entry point. It calls each sub-module and passes variables between them. Notice how the network module's outputs (like `vpc_id`) are passed directly into the compute and database modules — Terraform resolves these dependencies automatically.
 
@@ -90,7 +98,7 @@ module "network" {
 
 module "compute" {
   source             = "./modules/compute"
-  vpc_id             = module.network.vpc_id       # output from network module
+  vpc_id             = module.network.vpc_id           # output from network module
   public_subnet_ids  = module.network.public_subnet_ids
   private_subnet_ids = module.network.private_subnet_ids
   web_instance_type  = var.web_instance_type
@@ -108,16 +116,16 @@ module "database" {
   source            = "./modules/database"
   vpc_id            = module.network.vpc_id
   db_subnet_ids     = module.network.db_subnet_ids
-  app_sg_id         = module.compute.app_sg_id     # DB only allows this SG
+  app_sg_id         = module.compute.app_sg_id          # DB only allows this SG
   db_name           = var.db_name
   db_username       = var.db_username
-  db_password       = var.db_password              # sensitive variable — never logged
+  db_password       = var.db_password                   # sensitive variable — never logged
   db_instance_class = var.db_instance_class
   project_name      = var.project_name
 }
 ```
 
-### modules/network/main.tf — VPC and Security Groups
+### `modules/network/main.tf` — VPC and Security Groups
 
 ```hcl
 # The VPC is the private network container for all our resources
@@ -169,7 +177,7 @@ resource "aws_eip" "nat" { domain = "vpc" }
 resource "aws_nat_gateway" "main" {
   allocation_id = aws_eip.nat.id
   subnet_id     = aws_subnet.public[0].id
-  tags          = { Name = "${var.project_name}-nat" }
+  tags = { Name = "${var.project_name}-nat" }
 }
 
 # Security Groups: the firewall rules for each tier
@@ -180,7 +188,7 @@ resource "aws_security_group" "alb" {
   name   = "${var.project_name}-alb-sg"
   vpc_id = aws_vpc.main.id
   ingress { from_port = 80; to_port = 80; protocol = "tcp"; cidr_blocks = ["0.0.0.0/0"] }
-  egress  { from_port = 0;  to_port = 0;  protocol = "-1"; cidr_blocks = ["0.0.0.0/0"] }
+  egress  { from_port = 0;  to_port = 0;  protocol = "-1";  cidr_blocks = ["0.0.0.0/0"] }
 }
 
 resource "aws_security_group" "web" {
@@ -188,7 +196,7 @@ resource "aws_security_group" "web" {
   name   = "${var.project_name}-web-sg"
   vpc_id = aws_vpc.main.id
   ingress { from_port = 80; to_port = 80; protocol = "tcp"; security_groups = [aws_security_group.alb.id] }
-  egress  { from_port = 0;  to_port = 0;  protocol = "-1"; cidr_blocks = ["0.0.0.0/0"] }
+  egress  { from_port = 0;  to_port = 0;  protocol = "-1";  cidr_blocks = ["0.0.0.0/0"] }
 }
 
 resource "aws_security_group" "internal_alb" {
@@ -196,7 +204,7 @@ resource "aws_security_group" "internal_alb" {
   name   = "${var.project_name}-internal-alb-sg"
   vpc_id = aws_vpc.main.id
   ingress { from_port = 80; to_port = 80; protocol = "tcp"; security_groups = [aws_security_group.web.id] }
-  egress  { from_port = 0;  to_port = 0;  protocol = "-1"; cidr_blocks = ["0.0.0.0/0"] }
+  egress  { from_port = 0;  to_port = 0;  protocol = "-1";  cidr_blocks = ["0.0.0.0/0"] }
 }
 
 resource "aws_security_group" "app" {
@@ -204,7 +212,7 @@ resource "aws_security_group" "app" {
   name   = "${var.project_name}-app-sg"
   vpc_id = aws_vpc.main.id
   ingress { from_port = 3000; to_port = 3000; protocol = "tcp"; security_groups = [aws_security_group.internal_alb.id] }
-  egress  { from_port = 0;    to_port = 0;    protocol = "-1"; cidr_blocks = ["0.0.0.0/0"] }
+  egress  { from_port = 0;    to_port = 0;    protocol = "-1";  cidr_blocks = ["0.0.0.0/0"] }
 }
 
 resource "aws_security_group" "db" {
@@ -216,7 +224,7 @@ resource "aws_security_group" "db" {
 }
 ```
 
-### modules/database/main.tf — RDS Multi-AZ
+### `modules/database/main.tf` — RDS Multi-AZ
 
 ```hcl
 resource "aws_db_subnet_group" "main" {
@@ -232,17 +240,17 @@ resource "aws_db_instance" "primary" {
   engine_version         = "8.0"
   instance_class         = var.db_instance_class
   db_name                = var.db_name
-  username               = var.db_username  # from sensitive variable — never hardcoded
-  password               = var.db_password  # from sensitive variable — never logged
+  username               = var.db_username       # from sensitive variable — never hardcoded
+  password               = var.db_password       # from sensitive variable — never logged
   db_subnet_group_name   = aws_db_subnet_group.main.name
   vpc_security_group_ids = [var.db_sg_id]
-  multi_az               = true   # RDS creates a synchronous standby in the second AZ.
-                                  # If the primary fails, AWS fails over automatically.
-  storage_type           = "gp3"
-  allocated_storage      = 20
-  skip_final_snapshot    = false  # always take a final snapshot before destroy
+  multi_az               = true                  # RDS creates a synchronous standby in the second AZ.
+                                                 # If the primary fails, AWS fails over automatically.
+  storage_type              = "gp3"
+  allocated_storage         = 20
+  skip_final_snapshot       = false              # always take a final snapshot before destroy
   final_snapshot_identifier = "${var.project_name}-final-snapshot"
-  backup_retention_period   = 7   # 7 days of automated backups
+  backup_retention_period   = 7                  # 7 days of automated backups
 }
 
 resource "aws_db_instance" "replica" {
@@ -255,7 +263,7 @@ resource "aws_db_instance" "replica" {
 }
 ```
 
-### variables.tf
+### `variables.tf`
 
 ```hcl
 variable "aws_region"         { default = "us-east-1" }
@@ -340,12 +348,18 @@ terraform destroy
 
 ## What I Learned
 
-- **Modular Terraform** is the production standard. Each module (network, compute, database) can be developed, tested, and reused independently.
-- **Remote S3 state** enables team collaboration. Without it, two people running Terraform simultaneously would corrupt the state file.
-- **Multi-AZ RDS** provides automatic failover — if the primary database fails, AWS promotes the standby in under two minutes with no manual intervention.
-- **Security Groups as sources** (instead of CIDR blocks) is the correct pattern for inter-tier rules. It is more secure and more maintainable: if an IP changes, the rule still works because it references the SG, not the IP.
-- **`sensitive = true`** on password variables prevents Terraform from ever printing their values in plan or apply output — a critical safeguard.
+**Modular Terraform is the production standard.** Each module (network, compute, database) can be developed, tested, and reused independently.
+
+**Remote S3 state enables team collaboration.** Without it, two people running Terraform simultaneously would corrupt the state file.
+
+**Multi-AZ RDS provides automatic failover** — if the primary database fails, AWS promotes the standby in under two minutes with no manual intervention.
+
+**Security Groups as sources (instead of CIDR blocks)** is the correct pattern for inter-tier rules. It is more secure and more maintainable: if an IP changes, the rule still works because it references the SG, not the IP.
+
+**`sensitive = true` on password variables** prevents Terraform from ever printing their values in plan or apply output — a critical safeguard.
 
 ---
 
-**Tools Used:** Terraform · AWS VPC · EC2 · Application Load Balancer · Auto Scaling · RDS MySQL · S3 · IAM
+## Tools Used
+
+Terraform · AWS VPC · EC2 · Application Load Balancer · Auto Scaling · RDS MySQL · S3 · IAM
